@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IR Transceiver</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f2f4f7; color: #222; }
+  header { background: #1f2937; color: #fff; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 18px; margin: 0; }
+  #conn { font-size: 13px; padding: 3px 10px; border-radius: 12px; background: #888; }
+  #conn.ok { background: #16a34a; }
+  #conn.bad { background: #dc2626; }
+  .tabs { display: flex; background: #fff; border-bottom: 1px solid #ccc; }
+  .tab { flex: 1; padding: 12px; text-align: center; cursor: pointer; border: 0; background: none; font-size: 15px; }
+  .tab.active { border-bottom: 3px solid #2563eb; font-weight: 600; color: #2563eb; }
+  main { max-width: 700px; margin: 0 auto; padding: 14px; }
+  .panel { display: none; background: #fff; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+  .panel.active { display: block; }
+  label { font-size: 14px; color: #555; }
+  select, input[type=text] { width: 100%; padding: 10px; font-size: 16px; margin: 6px 0 12px; border: 1px solid #bbb; border-radius: 6px; }
+  button.btn { padding: 10px 16px; font-size: 16px; border: 0; border-radius: 6px; color: #fff; background: #2563eb; cursor: pointer; margin-right: 6px; }
+  button.btn.red { background: #dc2626; }
+  button.btn.gray { background: #6b7280; }
+  button.btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btnarea { margin: 6px 0 14px; display: flex; flex-direction: column; gap: 8px; }
+  .brow { display: flex; gap: 8px; }
+  button.rbtn { flex: 1; text-align: left; font-size: 17px; margin: 0; padding: 14px 16px; }
+  button.xbtn { margin: 0; padding: 10px 14px; }
+  .empty { color: #777; font-size: 14px; padding: 6px 0; }
+  .msg { margin-top: 12px; padding: 10px; border-radius: 6px; background: #eef; min-height: 20px; }
+  .msg.ok { background: #dcfce7; color: #166534; }
+  .msg.err { background: #fee2e2; color: #991b1b; }
+  .msg.wait { background: #ffedd5; color: #9a3412; animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .4; } }
+  #wavebox { overflow-x: auto; border: 1px solid #ccc; border-radius: 6px; margin: 12px 0; background: #fafafa; }
+  canvas { display: block; }
+  #raw { max-height: 160px; overflow-y: auto; border: 1px solid #ccc; border-radius: 6px; padding: 6px; font-family: monospace; font-size: 13px; background: #fafafa; margin-bottom: 12px; }
+  #raw div { padding: 1px 0; }
+  .count { font-size: 18px; margin: 10px 0; }
+  .hr { border-top: 1px solid #e5e7eb; margin: 14px 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>IR Transceiver</h1>
+  <span id="conn">FPGA: ...</span>
+</header>
+
+<div class="tabs">
+  <button class="tab active" data-tab="remote">Remote Control</button>
+  <button class="tab" data-tab="cloner">IR Cloner</button>
+</div>
+
+<main>
+  <!-- ============ Remote Control ============ -->
+  <section id="remote" class="panel active">
+    <label>อุปกรณ์</label>
+    <select id="devSel"></select>
+    <div id="btnArea" class="btnarea"></div>
+    <button class="btn red" id="delDevBtn">ลบอุปกรณ์นี้</button>
+    <div id="sendMsg" class="msg"></div>
+  </section>
+
+  <!-- ============ IR Cloner ============ -->
+  <section id="cloner" class="panel">
+    <button class="btn" id="capBtn">Capture New Signal</button>
+    <div id="capMsg" class="msg"></div>
+
+    <div class="count">Pulse Count: <b id="pulseCount">0</b></div>
+
+    <div id="wavebox"><canvas id="wave" width="300" height="70"></canvas></div>
+
+    <div>Raw Timings (µs)</div>
+    <div id="raw"></div>
+
+    <div class="hr"></div>
+    <label>บันทึกเข้าอุปกรณ์</label>
+    <select id="saveDev"></select>
+    <input type="text" id="newDevName" placeholder="ชื่ออุปกรณ์ใหม่ (เช่น ทีวีบ้าน)" style="display:none">
+    <label>ชื่อปุ่ม</label>
+    <input type="text" id="btnName" placeholder="เช่น เปิด/ปิด, เพิ่มเสียง">
+    <button class="btn" id="saveBtn" disabled>บันทึกปุ่ม</button>
+    <div id="saveMsg" class="msg"></div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const nbytes = s => new TextEncoder().encode(s).length;
+
+let captured = [];        // พัลส์ที่ดักจับได้ล่าสุด
+let capturing = false;    // กำลังรอสัญญาณอยู่หรือไม่
+let pollTimer = null;
+let devs = [];            // [{id, name, buttons:[{id, name}]}]
+let legacy = [];          // ชื่อโปรไฟล์แบบเดิม
+
+// ---------- helpers ----------
+function setMsg(id, text, cls) {
+  const el = $(id);
+  el.textContent = text;
+  el.className = 'msg ' + (cls || '');
+}
+
+async function api(path, method, body) {
+  const opt = { method: method || 'GET' };
+  if (body !== undefined) {
+    opt.headers = { 'Content-Type': 'application/json' };
+    opt.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, opt);
+  let json = {};
+  try { json = await res.json(); } catch (e) {}
+  json._http = res.status;
+  return json;
+}
+
+// ---------- tabs ----------
+document.querySelectorAll('.tab').forEach(t => {
+  t.onclick = () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    $(t.dataset.tab).classList.add('active');
+    if (t.dataset.tab === 'remote') loadAll();
+  };
+});
+
+// ---------- connection status ----------
+async function checkStatus() {
+  if (capturing) return;   // ไม่รบกวน SPI ระหว่างรอจับสัญญาณ
+  try {
+    const s = await api('/api/status');
+    const el = $('conn');
+    if (s.connected) { el.textContent = 'FPGA: OK'; el.className = 'ok'; }
+    else { el.textContent = 'FPGA: not found'; el.className = 'bad'; }
+  } catch (e) {
+    $('conn').textContent = 'No connection';
+    $('conn').className = 'bad';
+  }
+}
+
+// ---------- devices / buttons ----------
+async function loadAll() {
+  try {
+    const [d, l] = await Promise.all([api('/api/devices'), api('/api/profiles')]);
+    devs = Array.isArray(d.devices) ? d.devices : [];
+    legacy = Array.isArray(l.profiles) ? l.profiles : [];
+  } catch (e) {
+    setMsg('sendMsg', 'โหลดรายการไม่สำเร็จ', 'err');
+    return;
+  }
+  renderSelects();
+  renderButtons();
+}
+
+function addOpt(sel, value, text) {
+  const o = document.createElement('option');
+  o.value = value; o.textContent = text;
+  sel.appendChild(o);
+}
+
+function hasOpt(sel, value) {
+  return Array.from(sel.options).some(o => o.value === value);
+}
+
+function renderSelects() {
+  const rs = $('devSel'), ss = $('saveDev');
+  const rOld = rs.value, sOld = ss.value;
+  rs.innerHTML = ''; ss.innerHTML = '';
+  devs.forEach(d => { addOpt(rs, d.id, d.name); addOpt(ss, d.id, d.name); });
+  if (legacy.length) addOpt(rs, '__legacy', 'ทั่วไป (โปรไฟล์เดิม)');
+  addOpt(ss, '__new', '+ สร้างอุปกรณ์ใหม่…');
+  if (!rs.options.length) addOpt(rs, '', '(ยังไม่มีอุปกรณ์)');
+  if (rOld && hasOpt(rs, rOld)) rs.value = rOld;
+  if (sOld && hasOpt(ss, sOld)) ss.value = sOld;
+  else if (!devs.length) ss.value = '__new';
+  toggleNew();
+}
+
+function toggleNew() {
+  $('newDevName').style.display = ($('saveDev').value === '__new') ? '' : 'none';
+}
+
+function renderButtons() {
+  const area = $('btnArea');
+  area.innerHTML = '';
+  const v = $('devSel').value;
+  $('delDevBtn').disabled = (!v || v === '__legacy');
+
+  let items = [];
+  if (v === '__legacy') items = legacy.map(n => ({ id: n, name: n }));
+  else {
+    const d = devs.find(x => x.id === v);
+    if (d) items = d.buttons || [];
+  }
+  if (!items.length) {
+    const e = document.createElement('div');
+    e.className = 'empty';
+    e.textContent = v ? 'ยังไม่มีปุ่ม ไปที่แท็บ IR Cloner เพื่อบันทึกปุ่ม' : '';
+    area.appendChild(e);
+    return;
+  }
+  items.forEach(b => {
+    const row = document.createElement('div');
+    row.className = 'brow';
+    const go = document.createElement('button');
+    go.className = 'btn rbtn';
+    go.textContent = b.name;
+    go.onclick = () => sendBtn(v, b.id);
+    const x = document.createElement('button');
+    x.className = 'btn red xbtn';
+    x.textContent = '✕';
+    x.title = 'ลบปุ่มนี้';
+    x.onclick = () => delBtn(v, b);
+    row.appendChild(go);
+    row.appendChild(x);
+    area.appendChild(row);
+  });
+}
+
+$('devSel').onchange = renderButtons;
+$('saveDev').onchange = toggleNew;
+
+async function sendBtn(v, id) {
+  setMsg('sendMsg', 'Sending...', '');
+  const body = (v === '__legacy') ? { name: id } : { device: v, button: id };
+  try {
+    const r = await api('/api/send', 'POST', body);
+    if (r.success) setMsg('sendMsg', 'Success: ' + (r.message || 'TX Started'), 'ok');
+    else if (r._http === 409) setMsg('sendMsg', 'Busy: wait and try again', 'err');
+    else setMsg('sendMsg', 'Error: ' + (r.message || r._http), 'err');
+  } catch (e) {
+    setMsg('sendMsg', 'Error: no connection', 'err');
+  }
+}
+
+async function delBtn(v, b) {
+  if (!confirm('ลบปุ่ม "' + b.name + '" ?')) return;
+  try {
+    const r = (v === '__legacy')
+      ? await api('/api/profiles/delete', 'POST', { name: b.id })
+      : await api('/api/buttons/delete', 'POST', { device: v, button: b.id });
+    if (r.success) { setMsg('sendMsg', 'ลบปุ่มแล้ว', 'ok'); loadAll(); }
+    else setMsg('sendMsg', 'Error: ' + (r.message || r._http), 'err');
+  } catch (e) {
+    setMsg('sendMsg', 'Error: no connection', 'err');
+  }
+}
+
+$('delDevBtn').onclick = async () => {
+  const v = $('devSel').value;
+  const d = devs.find(x => x.id === v);
+  if (!d) return;
+  if (!confirm('ลบอุปกรณ์ "' + d.name + '" พร้อมปุ่มทั้งหมด ?')) return;
+  try {
+    const r = await api('/api/devices/delete', 'POST', { id: v });
+    if (r.success) { setMsg('sendMsg', 'ลบอุปกรณ์แล้ว', 'ok'); loadAll(); }
+    else setMsg('sendMsg', 'Error: ' + (r.message || r._http), 'err');
+  } catch (e) {
+    setMsg('sendMsg', 'Error: no connection', 'err');
+  }
+};
+
+// ---------- capture ----------
+function stopCapture() {
+  capturing = false;
+  clearInterval(pollTimer);
+  pollTimer = null;
+  $('capBtn').textContent = 'Capture New Signal';
+  $('capBtn').className = 'btn';
+}
+
+$('capBtn').onclick = async () => {
+  if (capturing) {            // กดซ้ำ = ยกเลิก
+    stopCapture();
+    setMsg('capMsg', 'Cancelled', '');
+    return;
+  }
+  try {
+    const r = await api('/api/capture/arm', 'POST');
+    if (!r.success) return setMsg('capMsg', 'Error: ' + (r.message || r._http), 'err');
+  } catch (e) {
+    return setMsg('capMsg', 'Error: no connection', 'err');
+  }
+  capturing = true;
+  $('capBtn').textContent = 'Cancel';
+  $('capBtn').className = 'btn gray';
+  $('saveBtn').disabled = true;
+  setMsg('capMsg', 'Waiting for IR signal...', 'wait');
+  pollTimer = setInterval(pollCapture, 400);
+};
+
+let polling = false;
+async function pollCapture() {
+  if (polling) return;        // กันยิงซ้อน
+  polling = true;
+  try {
+    const r = await api('/api/capture/poll');
+    if (r.status === 'captured') {
+      stopCapture();
+      captured = r.data || [];
+      showCaptured(r.overflow);
+    } else if (r.status !== 'waiting') {
+      stopCapture();
+      setMsg('capMsg', 'Error: ' + (r.message || 'poll failed'), 'err');
+    }
+  } catch (e) {
+    stopCapture();
+    setMsg('capMsg', 'Error: no connection', 'err');
+  }
+  polling = false;
+}
+
+function showCaptured(overflow) {
+  const n = captured.length;
+  $('pulseCount').textContent = n;
+  let txt = 'Captured: ' + n + ' Pulses';
+  if (overflow) txt += ' (buffer overflow - signal may be incomplete)';
+  setMsg('capMsg', txt, overflow ? 'err' : 'ok');
+  drawWave();
+  fillRaw();
+  $('saveBtn').disabled = (n === 0);
+}
+
+// ---------- waveform ----------
+function drawWave() {
+  const cv = $('wave');
+  const total = captured.reduce((a, b) => a + b, 0);
+  const scale = 0.02;                              // px ต่อ µs
+  const w = Math.max(300, Math.min(8000, Math.ceil(total * scale) + 20));
+  cv.width = w;                                    // ตั้งค่าใหม่ = ล้างภาพ
+  const g = cv.getContext('2d');
+  const HI = 15, LO = 55;
+  g.strokeStyle = '#2563eb';
+  g.lineWidth = 2;
+  g.beginPath();
+  let x = 10, y = LO;
+  g.moveTo(x, y);
+  for (let i = 0; i < captured.length; i++) {
+    const level = (i % 2 === 0) ? HI : LO;         // ตัวแรก = Mark (สูง)
+    g.lineTo(x, level);
+    x += captured[i] * (w - 20) / Math.max(total, 1);
+    g.lineTo(x, level);
+  }
+  g.stroke();
+}
+
+function fillRaw() {
+  const box = $('raw');
+  box.innerHTML = '';
+  captured.forEach((v, i) => {
+    const d = document.createElement('div');
+    d.textContent = '#' + (i + 1) + '  ' + (i % 2 === 0 ? 'Mark ' : 'Space') + '  ' + v;
+    box.appendChild(d);
+  });
+}
+
+// ---------- save (อุปกรณ์ -> ปุ่ม) ----------
+$('saveBtn').onclick = async () => {
+  const bname = $('btnName').value.trim();
+  if (!bname) return setMsg('saveMsg', 'ตั้งชื่อปุ่มก่อน', 'err');
+  if (nbytes(bname) > 60) return setMsg('saveMsg', 'ชื่อปุ่มยาวเกินไป (ไม่เกินราว 20 ตัวอักษรไทย)', 'err');
+  if (!captured.length) return setMsg('saveMsg', 'ยังไม่มีสัญญาณให้บันทึก', 'err');
+
+  let dev = $('saveDev').value;
+  try {
+    if (dev === '__new') {
+      const dname = $('newDevName').value.trim();
+      if (!dname) return setMsg('saveMsg', 'ตั้งชื่ออุปกรณ์ก่อน', 'err');
+      if (nbytes(dname) > 60) return setMsg('saveMsg', 'ชื่ออุปกรณ์ยาวเกินไป (ไม่เกินราว 20 ตัวอักษรไทย)', 'err');
+      const c = await api('/api/devices/create', 'POST', { name: dname });
+      if (!c.success) return setMsg('saveMsg', 'Error: ' + (c.message || c._http), 'err');
+      dev = c.id;
+    }
+    const r = await api('/api/buttons/save', 'POST', {
+      device: dev, name: bname, length: captured.length, data: captured
+    });
+    if (r.success) {
+      setMsg('saveMsg', 'บันทึกแล้ว: ' + bname, 'ok');
+      $('newDevName').value = '';
+      $('btnName').value = '';
+      await loadAll();
+      $('saveDev').value = dev;
+      toggleNew();
+    } else {
+      setMsg('saveMsg', 'Error: ' + (r.message || r._http), 'err');
+    }
+  } catch (e) {
+    setMsg('saveMsg', 'Error: no connection', 'err');
+  }
+};
+
+// ---------- init ----------
+loadAll();
+checkStatus();
+setInterval(checkStatus, 5000);
+</script>
+</body>
+</html>
