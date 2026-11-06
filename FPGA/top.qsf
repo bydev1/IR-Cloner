@@ -1,0 +1,67 @@
+# ==============================================================================
+# top.qsf -- Quartus Settings File for Universal IR Transceiver
+# Target: Intel Cyclone IV E (EP4CE6E22C8 / N)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Project & Device Target
+# ------------------------------------------------------------------------------
+set_global_assignment -name FAMILY "Cyclone IV E"
+set_global_assignment -name DEVICE EP4CE6E22C8
+set_global_assignment -name TOP_LEVEL_ENTITY top
+
+# File Inclusions
+set_global_assignment -name SDC_FILE cyclone4.sdc
+set_global_assignment -name VERILOG_FILE top.v
+set_global_assignment -name VERILOG_FILE ir_core.v
+set_global_assignment -name VERILOG_FILE spi_slave.v
+
+# ------------------------------------------------------------------------------
+# 2. Global Device Configuration (FATAL TRAPS MITIGATION)
+# ------------------------------------------------------------------------------
+# Unused Pins: As input tri-stated with weak pull-up (Prevent short circuit)
+set_global_assignment -name RESERVE_ALL_UNUSED_PINS_WEAK_PULLUP "AS INPUT TRI-STATED"
+
+# Dual-Purpose Pins: Reserve nCEO after configuration as regular IO
+set_global_assignment -name CYCLONEII_RESERVE_NCEO_AFTER_CONFIGURATION "USE AS REGULAR IO"
+
+# Global I/O Standard
+set_global_assignment -name STRATIX_DEVICE_IO_STANDARD "3.3-V LVTTL"
+
+# ------------------------------------------------------------------------------
+# 3. Pin Assignments (12 Pins)
+# ------------------------------------------------------------------------------
+# Clock & Reset
+set_location_assignment PIN_24 -to clk
+set_location_assignment PIN_88 -to rst_n_key
+
+# SPI Bus (ESP32-S3)
+set_location_assignment PIN_111 -to spi_sck
+set_location_assignment PIN_112 -to spi_cs_n
+set_location_assignment PIN_113 -to spi_mosi
+set_location_assignment PIN_110 -to spi_miso
+
+# IR Physical
+set_location_assignment PIN_115 -to ir_rx_in
+set_location_assignment PIN_119 -to ir_tx_out
+
+# On-board LEDs (Active-Low)
+set_location_assignment PIN_7 -to led[0]
+set_location_assignment PIN_3 -to led[1]
+set_location_assignment PIN_2 -to led[2]
+set_location_assignment PIN_1 -to led[3]
+# ------------------------------------------------------------------------------
+# 4. Instance Assignments (Advanced Hardware Safety & Signal Integrity)
+# ------------------------------------------------------------------------------
+# Weak Pull-Up for Floating Prevention (ESP32 Boot-up / Sensor Noise)
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to spi_cs_n
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to ir_rx_in
+
+# Drive Strength & EMI Control for 38 kHz IR Carrier Output
+set_instance_assignment -name CURRENT_STRENGTH_NEW 8MA -to ir_tx_out
+set_instance_assignment -name SLOW_SLEW_RATE ON -to ir_tx_out
+set_global_assignment -name LAST_QUARTUS_VERSION "24.1std.0 Lite Edition"
+set_global_assignment -name PARTITION_NETLIST_TYPE SOURCE -section_id Top
+set_global_assignment -name PARTITION_FITTER_PRESERVATION_LEVEL PLACEMENT_AND_ROUTING -section_id Top
+set_global_assignment -name PARTITION_COLOR 16764057 -section_id Top
+set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top
